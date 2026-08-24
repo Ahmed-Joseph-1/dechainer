@@ -82,20 +82,22 @@ class DechainerAccessibilityService : AccessibilityService() {
                     suspendPackage(packageName)
             }
 
-            serviceScope.launch(Dispatchers.IO) {
-                try {
-                    val info = PlayStoreRatingFetcher.fetch(packageName)
-                    val isUpdate = intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)
+            val isUpdate = intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)
+            if (!isUpdate) {
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        val info = PlayStoreRatingFetcher.fetch(packageName)
 
-                    if (info.hasExplicitContent && info.contentRating == "Rated 18+" && !isUpdate)
-                        withContext(Dispatchers.Main) {
-                            suspendPackage(packageName)
-                        }
 
-                    ratingPrefs.edit { putBoolean(packageName, info.hasExplicitContent) }
-                } catch (e: Exception) {
-                    ratingPrefs.edit { putBoolean(packageName, false) }
-                    e.printStackTrace()
+                        if (info.hasExplicitContent && info.contentRating == "Rated 18+")
+                            withContext(Dispatchers.Main) {
+                                suspendPackage(packageName)
+                            }
+
+                        ratingPrefs.edit { putBoolean(packageName, info.hasExplicitContent) }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
                 }
             }
         }
@@ -177,6 +179,9 @@ class DechainerAccessibilityService : AccessibilityService() {
             private set
 
         var disablingService = false
+            private set
+
+        var checkingRating = false
             private set
 
         fun prepareServiceDisable() { disablingService = true }
@@ -303,18 +308,6 @@ class DechainerAccessibilityService : AccessibilityService() {
                 sessionStartTime = SystemClock.elapsedRealtime()
                 checkDateReset()
                 startTracking(newPackage)
-
-                if (!ratingPrefs.contains(newPackage)) {
-                    serviceScope.launch(Dispatchers.IO) {
-                        try {
-                            val info = PlayStoreRatingFetcher.fetch(newPackage)
-                            ratingPrefs.edit { putBoolean(newPackage, info.hasExplicitContent) }
-                        } catch (e: Exception) {
-                            ratingPrefs.edit { putBoolean(newPackage, false) }
-                            e.printStackTrace()
-                        }
-                    }
-                }
             }
 
             if (className.contains("Activity", ignoreCase = true)) {
@@ -352,6 +345,27 @@ class DechainerAccessibilityService : AccessibilityService() {
         // Passive blocking: when the forbidden word appears on the screen
         else if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             val pkg = currentPackage ?: return
+
+            if (!ratingPrefs.contains(pkg) && !checkingRating) {
+                checkingRating = true
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        val info = PlayStoreRatingFetcher.fetch(pkg)
+
+                        if (info.hasExplicitContent && info.contentRating == "Rated 18+")
+                            withContext(Dispatchers.Main) {
+                                suspendPackage(pkg)
+                            }
+
+                        ratingPrefs.edit { putBoolean(pkg, info.hasExplicitContent) }
+                        checkingRating = false
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        checkingRating = false
+                    }
+                }
+            }
+
             val passivePatterns = passiveForbiddenPatterns[pkg] ?: return
 
             val screenText = buildScreenText(event) ?: return
