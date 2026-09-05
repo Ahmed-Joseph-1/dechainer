@@ -6,9 +6,7 @@ plugins {
 
 android {
     namespace = "io.github.warleysr.dechainer"
-    compileSdk {
-        version = release(36)
-    }
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "io.github.warleysr.dechainer"

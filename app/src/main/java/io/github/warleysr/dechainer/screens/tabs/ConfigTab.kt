@@ -1,7 +1,11 @@
 package io.github.warleysr.dechainer.screens.tabs
 
+import androidx.compose.material.icons.outlined.WifiOff
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import android.app.admin.DevicePolicyManager
 import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -57,6 +61,7 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
     var showCancelForcedRemovalDialog by remember { mutableStateOf(false) }
     var showFinishForcedRemovalDialog by remember { mutableStateOf(false) }
     var confirmForcedRemoval by remember { mutableStateOf(false) }
+    var showSoberUpDialog by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -100,13 +105,13 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
             item {
                 ListItem(
                     headlineContent = { Text(stringResource(R.string.dns_settings)) },
-                    supportingContent = { 
+                    supportingContent = {
                         Text( stringResource(R.string.dns_description))
                     },
                     leadingContent = { Icon(Icons.Outlined.Dns, "") },
-                    modifier = Modifier.clickable { 
+                    modifier = Modifier.clickable {
                         dnsErrorRes = null
-                        showDnsDialog = true 
+                        showDnsDialog = true
                     }
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
@@ -120,6 +125,43 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
             }
+
+            // ---  SOBER UP BLOCK ---
+            item {
+                val soberUpPrefs = context.getSharedPreferences("sober_up_prefs", Context.MODE_PRIVATE)
+                var isSoberUpEnabled by remember { mutableStateOf(soberUpPrefs.getBoolean("enabled", false)) }
+
+                ListItem(
+                    headlineContent = { Text("Sober Up Network Block") },
+                    supportingContent = { Text("Disable internet temporarily on sensitive searches") },
+                    leadingContent = { Icon(Icons.Outlined.WifiOff, "") },
+                    trailingContent = {
+                        Switch(
+                            checked = isSoberUpEnabled,
+                            onCheckedChange = { checked ->
+                                if (!checked) {
+                                    pendingAction = {
+                                        isSoberUpEnabled = false
+                                        soberUpPrefs.edit { putBoolean("enabled", false) }
+                                    }
+                                } else {
+                                    // NEW: Ensure Advanced Blocking is on first
+                                    if (!advancedBlocking) {
+                                        Toast.makeText(context, "Please enable Activity Blocker (Advanced Blocking) first.", Toast.LENGTH_LONG).show()
+                                        return@Switch
+                                    }
+                                    isSoberUpEnabled = true
+                                    soberUpPrefs.edit { putBoolean("enabled", true) }
+                                }
+                            }
+                        )
+                    },
+                    modifier = Modifier.clickable { showSoberUpDialog = true }
+                )
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            }
+            // -----------------------------
+
             item {
                 ListItem(
                     headlineContent = { Text(stringResource(R.string.block_torrents)) },
@@ -247,6 +289,47 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
         )
     }
 
+    if (showSoberUpDialog) {
+        val prefs = context.getSharedPreferences("sober_up_prefs", Context.MODE_PRIVATE)
+        val currentDuration = prefs.getInt("duration", 1)
+        var currentWordsSet by remember { mutableStateOf(prefs.getStringSet("sensitive_words", emptySet()) ?: emptySet()) }
+
+        SoberUpDialog(
+            currentDuration = currentDuration,
+            currentWordsSet = currentWordsSet,
+            onDismiss = { showSoberUpDialog = false },
+            onSaveTime = { newTime ->
+                if (newTime < currentDuration) {
+                    pendingAction = {
+                        prefs.edit { putInt("duration", newTime) }
+                        showSoberUpDialog = false
+                        Toast.makeText(context, "Time updated", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    prefs.edit { putInt("duration", newTime) }
+                    showSoberUpDialog = false
+                    Toast.makeText(context, "Time updated", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onToggleWord = { word ->
+                val updatedSet = currentWordsSet.toMutableSet()
+                if (updatedSet.contains(word)) {
+                    pendingAction = {
+                        updatedSet.remove(word)
+                        prefs.edit { putStringSet("sensitive_words", updatedSet) }
+                        currentWordsSet = updatedSet
+                        Toast.makeText(context, "Keyword removed", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    updatedSet.add(word)
+                    prefs.edit { putStringSet("sensitive_words", updatedSet) }
+                    currentWordsSet = updatedSet
+                    Toast.makeText(context, "Keyword added", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
     if (showStartForcedRemovalDialog) {
         AlertDialog(
             onDismissRequest = { showStartForcedRemovalDialog = false },
@@ -300,7 +383,7 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
 
     if (showFinishForcedRemovalDialog) {
         AlertDialog(
-            onDismissRequest = { 
+            onDismissRequest = {
                 showFinishForcedRemovalDialog = false
                 confirmForcedRemoval = false
             },
@@ -466,8 +549,8 @@ fun DnsSelectionDialog(
         "AdGuard DNS" to "family.adguard-dns.com",
         "CleanBrowsing" to "adult-filter-dns.cleanbrowsing.org"
     )
-    
-    var selectedOption by remember { 
+
+    var selectedOption by remember {
         mutableStateOf(
             when {
                 options.any { it.second == currentDns } -> currentDns
@@ -552,7 +635,7 @@ fun DnsSelectionDialog(
             val canApply = selectedOption != null && (selectedOption != "custom" || isCustomValid) && !isLoading
             TextButton(
                 enabled = canApply,
-                onClick = { 
+                onClick = {
                     val finalHost = when(selectedOption) {
                         "custom" -> customHost
                         else -> selectedOption
@@ -586,8 +669,8 @@ fun LanguageSelectionDialog(
         "en" to "English",
         "pt" to "Português"
     )
-    
-    var selectedOption by remember { 
+
+    var selectedOption by remember {
         mutableStateOf(if (currentLocale.startsWith("pt")) "pt" else "en")
     }
 
@@ -734,3 +817,69 @@ fun ImpulseLockDialog(
     )
 }
 
+@Composable
+fun SoberUpDialog(
+    currentDuration: Int,
+    currentWordsSet: Set<String>,
+    onDismiss: () -> Unit,
+    onSaveTime: (Int) -> Unit,
+    onToggleWord: (String) -> Unit
+) {
+    var durationText by remember { mutableStateOf(currentDuration.toString()) }
+    var singleWordInput by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sober Up Settings") },
+        text = {
+            Column {
+                // TIME SETTING
+                Text("Block Duration (minutes)", fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = durationText,
+                        onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) durationText = it },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = {
+                        val newTime = durationText.toIntOrNull() ?: 1
+                        onSaveTime(newTime)
+                    }) { Text("Save Time") }
+                }
+
+                Spacer(Modifier.height(24.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(24.dp))
+
+                // HIDDEN KEYWORD MANAGEMENT
+                Text("Manage Hidden Keywords", fontWeight = FontWeight.Bold)
+                Text("Type a keyword to add it. If it already exists, typing it will remove it.", style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = singleWordInput,
+                    onValueChange = { singleWordInput = it },
+                    label = { Text("Enter a single keyword") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        if (singleWordInput.isNotBlank()) {
+                            onToggleWord(singleWordInput.trim().lowercase())
+                            singleWordInput = ""
+                        }
+                    }
+                ) { Text("Add / Remove Keyword") }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        }
+    )
+}

@@ -1,20 +1,12 @@
 package io.github.warleysr.dechainer.screens.tabs
 
-import androidx.compose.animation.AnimatedVisibility
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -27,7 +19,6 @@ import io.github.warleysr.dechainer.R
 import io.github.warleysr.dechainer.screens.common.RecoveryConfirmDialog
 import io.github.warleysr.dechainer.security.SecurityManager
 import io.github.warleysr.dechainer.models.AppItem
-import io.github.warleysr.dechainer.models.BlockedList
 import io.github.warleysr.dechainer.viewmodels.AppsViewModel
 import io.github.warleysr.dechainer.viewmodels.BrowserRestrictionsViewModel
 import io.github.warleysr.dechainer.viewmodels.DeviceOwnerViewModel
@@ -39,8 +30,7 @@ fun BrowserRestrictionsScreen(
     appsViewModel: AppsViewModel = viewModel(),
     deviceOwnerViewModel: DeviceOwnerViewModel = viewModel()
 ) {
-    var showEditDialog by remember { mutableStateOf<BlockedList?>(null) }
-    var isCreatingNew by remember { mutableStateOf(false) }
+    var singleSiteInput by remember { mutableStateOf("") }
     var showRestrictionsDialog by remember { mutableStateOf<AppItem?>(null) }
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var onCancelAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -58,7 +48,7 @@ fun BrowserRestrictionsScreen(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
-                
+
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column {
                         viewModel.browsers.forEachIndexed { index, browser ->
@@ -66,7 +56,14 @@ fun BrowserRestrictionsScreen(
                             val notSupported = !manager.supportsRestrictions(browser.packageName)
                             ListItem(
                                 modifier = Modifier.clickable(enabled = !notSupported) {
-                                    showRestrictionsDialog = browser
+                                    showRestrictionsDialog = AppItem(
+                                        name = browser.name,
+                                        packageName = browser.packageName,
+                                        icon = browser.icon,
+                                        isSystem = false,
+                                        isHidden = false,
+                                        isUninstallBlocked = false
+                                    )
                                 },
                                 headlineContent = { Text(browser.name) },
                                 supportingContent = {
@@ -90,12 +87,12 @@ fun BrowserRestrictionsScreen(
                                 },
                                 trailingContent = {
                                     Switch(
-                                        checked = !browser.isSuspended,
+                                        checked = browser.isEnabled,
                                         onCheckedChange = { checked ->
-                                            val wasSuspended = browser.isSuspended
-                                            viewModel.browsers[index] = browser.copy(isSuspended = !checked)
+                                            val wasEnabled = browser.isEnabled
+                                            viewModel.browsers[index] = browser.copy(isEnabled = checked)
                                             onCancelAction = {
-                                                viewModel.browsers[index] = browser.copy(isSuspended = wasSuspended)
+                                                viewModel.browsers[index] = browser.copy(isEnabled = wasEnabled)
                                             }
                                             pendingAction = {
                                                 appsViewModel.suspendApp(browser.packageName, !checked)
@@ -110,53 +107,53 @@ fun BrowserRestrictionsScreen(
                 Spacer(modifier = Modifier.height(24.dp))
             }
 
-            // Blocked Sites Section
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        stringResource(R.string.blocked_sites),
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                    IconButton(onClick = { 
-                        isCreatingNew = true
-                        showEditDialog = BlockedList("", "", emptyList())
-                    }) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                    }
-                }
-            }
-
-            items(viewModel.blockedLists, key = { "url_${it.id}" }) { list ->
-                BlockedListAccordion(
-                    list = list,
-                    onEdit = { 
-                        isCreatingNew = false
-                        showEditDialog = list 
-                    },
-                    onDelete = {
-                        pendingAction = { viewModel.removeList(list.id) }
-                    }
+                Text(
+                    "Block Specific Websites",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(top = 24.dp, bottom = 8.dp)
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-            }
+                Text(
+                    "Type a site URL to add it. If it already exists, typing it will remove it.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = singleSiteInput,
+                    onValueChange = { singleSiteInput = it },
+                    label = { Text(stringResource(R.string.site_url_hint)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        if (singleSiteInput.isNotBlank()) {
+                            val site = singleSiteInput.trim().lowercase()
+                            val isRemoving = viewModel.hasHiddenSite(site)
 
+                            if (isRemoving) {
+                                pendingAction = {
+                                    viewModel.toggleHiddenSite(site, remove = true)
+                                    Toast.makeText(context, "Site removed", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                viewModel.toggleHiddenSite(site, remove = false)
+                                Toast.makeText(context, "Site added", Toast.LENGTH_SHORT).show()
+                            }
+                            singleSiteInput = ""
+                        }
+                    }
+                ) { Text("Add / Remove Site") }
+                Spacer(modifier = Modifier.height(24.dp))
+            }
         }
     }
 
     showRestrictionsDialog?.let { browser ->
         AppRestrictionsDialog(
-            app = AppItem(
-                name = browser.name,
-                packageName = browser.packageName,
-                icon = browser.icon,
-                isSystem = false,
-                isHidden = false,
-                isUninstallBlocked = false
-            ),
+            app = browser,
             viewModel = deviceOwnerViewModel,
             onDismiss = { showRestrictionsDialog = null },
             onSave = { restrictions ->
@@ -164,60 +161,6 @@ fun BrowserRestrictionsScreen(
                     deviceOwnerViewModel.setApplicationRestrictions(browser.packageName, restrictions)
                 }
                 showRestrictionsDialog = null
-            }
-        )
-    }
-
-    if (showEditDialog != null) {
-        val currentList = showEditDialog!!
-        var title by remember { mutableStateOf(currentList.title) }
-        var sites by remember { mutableStateOf(currentList.sites.joinToString("\n")) }
-        
-        AlertDialog(
-            onDismissRequest = { showEditDialog = null },
-            title = { 
-                Text(
-                    if (isCreatingNew) {
-                        stringResource(R.string.add_site)
-                    } else currentList.title
-                )
-            },
-            text = {
-                Column {
-                    OutlinedTextField(
-                        value = title,
-                        onValueChange = { title = it },
-                        label = { Text(stringResource(R.string.list_title)) },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = sites,
-                        onValueChange = { sites = it },
-                        label = { Text(stringResource(R.string.sites_lines)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 5
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (title.isNotBlank()) {
-                        pendingAction = { 
-                            viewModel.saveOrUpdateList(
-                                if (isCreatingNew) null else currentList.id,
-                                title,
-                                sites
-                            )
-                        }
-                    }
-                    showEditDialog = null
-                }) { Text(stringResource(R.string.confirm)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showEditDialog = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
             }
         )
     }
@@ -238,63 +181,12 @@ fun BrowserRestrictionsScreen(
                         true
                     } else false
                 },
-                onDismiss = { 
+                onDismiss = {
                     onCancelAction?.invoke()
                     onCancelAction = null
-                    pendingAction = null 
+                    pendingAction = null
                 }
             )
-        }
-    }
-}
-
-@Composable
-fun BlockedListAccordion(
-    list: BlockedList,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded }
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(list.title, style = MaterialTheme.typography.titleMedium)
-                    Text("${list.sites.size} sites", style = MaterialTheme.typography.labelSmall)
-                }
-                IconButton(onClick = onEdit) {
-                    Icon(Icons.Default.Edit, contentDescription = "")
-                }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "")
-                }
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = null
-                )
-            }
-            
-            AnimatedVisibility(visible = expanded) {
-                Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
-                    HorizontalDivider()
-                    list.sites.forEach { site ->
-                        Text(
-                            site,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                    }
-                }
-            }
         }
     }
 }

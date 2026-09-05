@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.NoAdultContent
 import androidx.compose.material.icons.outlined.RemoveRedEye
+import androidx.compose.material.icons.outlined.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,14 +43,79 @@ class BlockedWordActivity : ComponentActivity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        val forbiddenWord = intent.getStringExtra("word") ?: "Unknown"
+        val isNetworkBlock = intent.getBooleanExtra("isNetworkBlock", false)
+
         setContent {
-            BlockedWordActivity(
-                forbiddenWord = intent.getStringExtra("word")!!,
+            BlockedWordActivityScreen(
+                forbiddenWord = forbiddenWord,
+                isNetworkBlock = isNetworkBlock,
                 onClose = { finishAfterTransition() }
             )
         }
+
+
     }
 }
+
+
+@Composable
+fun BlockedWordActivityScreen(forbiddenWord: String, isNetworkBlock: Boolean, onClose: () -> Unit) {
+    var showWordBlurred by remember { mutableStateOf(true) }
+
+    // Change colors based on the severity of the block
+    val bgColor = if (isNetworkBlock) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.background
+    val icon = if (isNetworkBlock) Icons.Outlined.WifiOff else Icons.Default.NoAdultContent
+
+    Surface(modifier = Modifier.fillMaxSize(), color = bgColor) {
+        Column(
+            modifier = Modifier.padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(64.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = if (isNetworkBlock) "Internet Disabled!" else stringResource(R.string.blocked_word),
+                style = MaterialTheme.typography.headlineMedium
+            )
+
+            val reasonText = if (isNetworkBlock) {
+                "A highly sensitive keyword was detected. To help you sober up, your internet access has been temporarily disabled."
+            } else {
+                stringResource(R.string.blocked_word_description)
+            }
+
+            Text(
+                text = reasonText,
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text("Keyword triggered:", style = MaterialTheme.typography.labelMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = forbiddenWord,
+                    modifier = Modifier.blur(if (showWordBlurred) 8.dp else 0.dp),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                IconButton(onClick = { showWordBlurred = !showWordBlurred }) {
+                    Icon(Icons.Outlined.RemoveRedEye, null)                }
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+            Button(onClick = onClose) {
+                Text(stringResource(R.string.close))
+            }
+        }
+    }
+}
+
 
 @Composable
 fun BlockedWordActivity(forbiddenWord: String, onClose: () -> Unit) {

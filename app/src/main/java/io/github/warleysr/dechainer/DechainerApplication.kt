@@ -2,6 +2,7 @@ package io.github.warleysr.dechainer
 
 import android.app.Application
 import io.github.warleysr.dechainer.security.SecurityManager
+import io.github.warleysr.dechainer.utils.NetworkBlockManager
 import timber.log.Timber
 
 class DechainerApplication : Application() {
@@ -18,6 +19,8 @@ class DechainerApplication : Application() {
         super.onCreate()
 
         instance = this
+
+        NetworkBlockManager.checkAndRestoreOnBoot(this) // Added boot check
 
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())

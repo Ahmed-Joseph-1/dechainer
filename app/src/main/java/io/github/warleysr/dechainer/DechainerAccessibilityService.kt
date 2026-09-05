@@ -36,15 +36,26 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+import io.github.warleysr.dechainer.utils.NetworkBlockManager
 
 @SuppressLint("AccessibilityPolicy")
 class DechainerAccessibilityService : AccessibilityService() {
+
+    @Volatile private var isNetworkBlocking = false
+    private var soberUpPrefs: SharedPreferences? = null
+    private var isSoberUpEnabled = false
+    private var sensitiveKeywordsList: List<String> = emptyList()
+    private var browserPackages: Set<String> = emptySet()
+
+    private var wasTyping: Boolean = false
+    private var lastTypedText: String = ""
+    // ---------------------
 
     private val handler = Handler(Looper.getMainLooper())
     private var currentPackage: String? = null
     private var sessionStartTime: Long = 0
     private var lastCheckDate: String = LocalDate.now().toString()
-    private val lastClosedTimes = HashMap<String, Long>();
+    private val lastClosedTimes = HashMap<String, Long>()
 
     private lateinit var limitPrefs: SharedPreferences
     private lateinit var usagePrefs: SharedPreferences
@@ -58,6 +69,15 @@ class DechainerAccessibilityService : AccessibilityService() {
     private var targetPackages: Set<String> = emptySet()
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    private fun updateSensitiveWords() {
+        isSoberUpEnabled = soberUpPrefs?.getBoolean("enabled", false) ?: false
+        val userKeywords = soberUpPrefs?.getStringSet("sensitive_words", emptySet()) ?: emptySet()
+        val baseKeywords = try {
+            resources.openRawResource(R.raw.block_keywords_expanded).bufferedReader().readLines().filter { it.isNotBlank() }
+        } catch (e: Exception) { emptyList() }
+        sensitiveKeywordsList = baseKeywords + userKeywords.toList()
+    }
 
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -87,7 +107,6 @@ class DechainerAccessibilityService : AccessibilityService() {
                 serviceScope.launch(Dispatchers.IO) {
                     try {
                         val info = PlayStoreRatingFetcher.fetch(packageName)
-
 
                         if (info.hasExplicitContent && info.contentRating == "Rated 18+")
                             withContext(Dispatchers.Main) {
@@ -134,18 +153,49 @@ class DechainerAccessibilityService : AccessibilityService() {
                     currentPackage?.let { startTracking(it) }
                 }
             }
-
             blockedWordsPrefs -> {
                 updateForbiddenPatterns()
+            }
+            soberUpPrefs -> {
+                updateSensitiveWords()
             }
         }
     }
 
+    data class ScreenExtraction(val text: String, val isTyping: Boolean)
+
+    private fun extractSearchBoxTextAndFocus(): ScreenExtraction {
+        val rootNode = rootInActiveWindow ?: return ScreenExtraction("", false)
+        val sb = StringBuilder()
+        var isTyping = false
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+
+            // ONLY extract text if the node is an editable field (like a URL bar or Search box)
+            if (node.isEditable || node.className?.contains("EditText") == true) {
+                if (node.isFocused) {
+                    isTyping = true
+                }
+                node.text?.let { sb.append(it).append(" ") }
+            }
+
+            for (i in 0 until node.childCount) {
+                traverse(node.getChild(i))
+            }
+        }
+
+        traverse(rootNode)
+        rootNode.recycle()
+        return ScreenExtraction(sb.toString().lowercase(), isTyping)
+    }
+
     private fun updateForbiddenPatterns() {
+        browserPackages = BrowserRestrictionsManager(applicationContext).getPossibleBrowsers().map { it.activityInfo.packageName }.toSet()
         val words = blockedWordsPrefs.getStringSet("blocked_words", emptySet()) ?: emptySet()
         forbiddenPatterns = words.associateWith { word ->
             Regex(
-                "(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])",
+                "(?<![\\\\p{L}\\\\p{N}_])${Regex.escape(word)}(?![\\\\p{L}\\\\p{N}_])",
                 RegexOption.IGNORE_CASE
             )
         }
@@ -160,7 +210,7 @@ class DechainerAccessibilityService : AccessibilityService() {
                 if (wordsSet.isNotEmpty()) {
                     passiveMap[pkg] = wordsSet.associateWith { word ->
                         Regex(
-                            "(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])",
+                            "(?<![\\\\p{L}\\\\p{N}_])${Regex.escape(word)}(?![\\\\p{L}\\\\p{N}_])",
                             RegexOption.IGNORE_CASE
                         )
                     }
@@ -214,11 +264,14 @@ class DechainerAccessibilityService : AccessibilityService() {
         blockedWordsPrefs = getSharedPreferences("blocked_words_prefs", MODE_PRIVATE)
         securityPrefs = getSharedPreferences("security_prefs", MODE_PRIVATE)
         ratingPrefs = getSharedPreferences("app_ratings", MODE_PRIVATE)
+        soberUpPrefs = getSharedPreferences("sober_up_prefs", MODE_PRIVATE)
 
         limitPrefs.registerOnSharedPreferenceChangeListener(prefsListener)
         blockedWordsPrefs.registerOnSharedPreferenceChangeListener(prefsListener)
+        soberUpPrefs?.registerOnSharedPreferenceChangeListener(prefsListener)
 
         updateForbiddenPatterns()
+        updateSensitiveWords()
 
         val blockedPackages = getControlledPackages()
         suspendPackages(blockedPackages, false)
@@ -264,6 +317,7 @@ class DechainerAccessibilityService : AccessibilityService() {
         unregisterReceiver(screenReceiver)
         limitPrefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         blockedWordsPrefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        soberUpPrefs?.unregisterOnSharedPreferenceChangeListener(prefsListener)
         stopTrackingAndSave()
         isRunning = false
 
@@ -277,10 +331,10 @@ class DechainerAccessibilityService : AccessibilityService() {
                 dpm.addUserRestriction(admin, UserManager.DISALLOW_INSTALL_APPS)
             }
 
-            val intent = Intent(
+            val intentActivity = Intent(
                 this@DechainerAccessibilityService, AccessibilityRequestActivity::class.java
             ).apply { flags = FLAG_ACTIVITY_NEW_TASK }
-            startActivity(intent)
+            startActivity(intentActivity)
         }
 
         return super.onUnbind(intent)
@@ -293,7 +347,6 @@ class DechainerAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.packageName == packageName) return
 
-        // App tracking to control time limits and time between re-openings
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val newPackage = event.packageName?.toString() ?: return
             val className = event.className?.toString() ?: return
@@ -305,6 +358,8 @@ class DechainerAccessibilityService : AccessibilityService() {
             if (newPackage != currentPackage) {
                 stopTrackingAndSave()
                 currentPackage = newPackage
+                wasTyping = false // Reset typing state on app switch
+                lastTypedText = ""
                 sessionStartTime = SystemClock.elapsedRealtime()
                 checkDateReset()
                 startTracking(newPackage)
@@ -321,8 +376,6 @@ class DechainerAccessibilityService : AccessibilityService() {
                     performGlobalAction(GLOBAL_ACTION_BACK)
             }
         }
-
-        // Active blocking: when the user types the forbidden word
         else if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
             if (event.source?.isEditable == false) return
 
@@ -341,10 +394,52 @@ class DechainerAccessibilityService : AccessibilityService() {
 
             showBlockedActivity(forbiddenWord)
         }
+        else if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
+            val pkg = currentPackage ?: event.packageName?.toString() ?: return
 
-        // Passive blocking: when the forbidden word appears on the screen
-        else if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-            val pkg = currentPackage ?: return
+            // --- SOBER UP BLOCK LOGIC ---
+            if (pkg == "com.android.chrome" || browserPackages.contains(pkg)) {
+                if (isSoberUpEnabled) {
+                    val extraction = extractSearchBoxTextAndFocus()
+
+                    if (extraction.isTyping) {
+                        // User is currently typing in the URL bar/Search box
+                        wasTyping = true
+                        lastTypedText = extraction.text
+                    } else if (wasTyping) {
+                        // User was typing, but focus was just lost (they hit Enter/Search or closed keyboard)
+                        wasTyping = false
+
+                        // Fallback to the last typed text if the browser cleared the URL bar on submission
+                        val textToCheck = if (extraction.text.isNotBlank()) extraction.text else lastTypedText
+                        val matchedWord = sensitiveKeywordsList.firstOrNull { textToCheck.contains(it) }
+
+                        if (matchedWord != null && !isNetworkBlocking) {
+                            isNetworkBlocking = true
+
+                            performGlobalAction(GLOBAL_ACTION_BACK)
+                            performGlobalAction(GLOBAL_ACTION_BACK)
+
+                            NetworkBlockManager.triggerBlock(applicationContext)
+
+                            val intentActivity = Intent(this, BlockedWordActivity::class.java).apply {
+                                flags = FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                putExtra("word", matchedWord)
+                                putExtra("isNetworkBlock", true)
+                            }
+                            startActivity(intentActivity)
+
+                            handler.postDelayed({
+                                isNetworkBlocking = false
+                            }, 2000)
+                            return
+                        }
+                    }
+                }
+            }
+            // ---------------------------------
+
+            if (!targetPackages.contains(pkg)) return
 
             if (!ratingPrefs.contains(pkg) && !checkingRating) {
                 checkingRating = true
@@ -367,7 +462,6 @@ class DechainerAccessibilityService : AccessibilityService() {
             }
 
             val passivePatterns = passiveForbiddenPatterns[pkg] ?: return
-
             val screenText = buildScreenText(event) ?: return
 
             passivePatterns.forEach { (word, regex) ->
@@ -382,9 +476,7 @@ class DechainerAccessibilityService : AccessibilityService() {
 
     private fun buildScreenText(event: AccessibilityEvent): String? {
         val sb = StringBuilder()
-
         event.text.forEach { sb.append(it).append(' ') }
-
         event.source?.also { root ->
             fun traverse(node: AccessibilityNodeInfo?) {
                 node ?: return
@@ -395,27 +487,25 @@ class DechainerAccessibilityService : AccessibilityService() {
             traverse(root)
             root.recycle()
         }
-
         return sb.toString().trim().takeIf { it.isNotBlank() }
     }
 
     private fun showBlockedActivity(forbiddenWord: String) {
         serviceScope.launch {
             withContext(Dispatchers.Main) {
-                val intent = Intent(
+                val intentActivity = Intent(
                     this@DechainerAccessibilityService, BlockedWordActivity::class.java
                 ).apply {
                     flags = FLAG_ACTIVITY_NEW_TASK
                     putExtra("word", forbiddenWord)
                 }
-                startActivity(intent)
+                startActivity(intentActivity)
             }
         }
     }
 
     private fun suspendPackages(packages: Array<String>, suspend: Boolean = true) {
-        val dpm =
-            applicationContext.getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val dpm = applicationContext.getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val admin = ComponentName(applicationContext, DechainerDeviceAdminReceiver::class.java)
         if (!dpm.isAdminActive(admin)) return
         dpm.setPackagesSuspended(admin, packages, suspend)
@@ -499,8 +589,7 @@ class DechainerAccessibilityService : AccessibilityService() {
             putExtra("limit", limit)
         })
     }
-    
-    
+
     private fun checkDateReset() {
         val today = LocalDate.now().toString()
         if (today != lastCheckDate) {
@@ -520,5 +609,4 @@ class DechainerAccessibilityService : AccessibilityService() {
         }
         return 0
     }
-
 }

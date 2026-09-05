@@ -32,6 +32,10 @@ import io.github.warleysr.dechainer.ui.theme.DechainerTheme
 import io.github.warleysr.dechainer.viewmodels.DeviceOwnerViewModel
 import kotlinx.coroutines.delay
 
+import androidx.compose.material.icons.outlined.WifiOff
+import androidx.compose.ui.platform.LocalContext
+
+
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,6 +43,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             DechainerTheme {
+
+
                 val viewModel: DeviceOwnerViewModel = viewModel()
                 viewModel.addShizukuListener()
 
@@ -69,12 +75,23 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             },
+
                             actions = {
+
+                                SoberUpTimerAction()
+
+                                var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+                                LaunchedEffect(Unit) {
+                                    while(true) {
+                                        currentTime = System.currentTimeMillis()
+                                        kotlinx.coroutines.delay(1000)
+                                    }
+                                }
+
                                 if (SecurityManager.isSessionActive()) {
                                     val remaining = SecurityManager.sessionEndTime - currentTime
                                     val minutes = (remaining / 1000) / 60
                                     val seconds = (remaining / 1000) % 60
-                                    
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Icon(Icons.Outlined.LockClock, null, modifier = Modifier.padding(end = 4.dp))
                                         Text(
@@ -87,6 +104,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
+
                         )
                     },
                     bottomBar = {
@@ -147,5 +165,47 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         SecurityManager.endSession()
+    }
+}
+
+
+@Composable
+fun SoberUpTimerAction() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val soberUpPrefs = context.getSharedPreferences("sober_up", android.content.Context.MODE_PRIVATE)
+
+    var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var networkEndTime by remember { mutableLongStateOf(soberUpPrefs.getLong("end_time", 0L)) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            currentTime = System.currentTimeMillis()
+            networkEndTime = soberUpPrefs.getLong("end_time", 0L)
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+
+    if (networkEndTime > currentTime) {
+        val remaining = networkEndTime - currentTime
+        val m = (remaining / 1000) / 60
+        val s = (remaining / 1000) % 60
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(end = 12.dp)
+        ) {
+            Icon(
+                Icons.Outlined.WifiOff,
+                contentDescription = null,
+                modifier = Modifier.padding(end = 4.dp),
+                tint = MaterialTheme.colorScheme.error
+            )
+            Text(
+                text = "%02d:%02d".format(m, s),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.error,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+            )
+        }
     }
 }

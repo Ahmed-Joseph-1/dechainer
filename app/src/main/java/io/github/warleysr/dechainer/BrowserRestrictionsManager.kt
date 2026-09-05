@@ -10,6 +10,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.core.net.toUri
 import io.github.warleysr.dechainer.viewmodels.DeviceOwnerViewModel
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 
 class BrowserRestrictionsManager(private val context: Context) {
 
@@ -21,23 +23,19 @@ class BrowserRestrictionsManager(private val context: Context) {
         val browserCategoryIntent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_APP_BROWSER)
         }
-
         val httpIntent = Intent(Intent.ACTION_VIEW, "http://www.example.com".toUri())
         val httpsIntent = Intent(Intent.ACTION_VIEW, "https://www.example.com".toUri())
 
-        val flags =
-            PackageManager.MATCH_ALL
+        val flags = PackageManager.MATCH_ALL
 
         listOf(browserCategoryIntent, httpIntent, httpsIntent).forEach { intent ->
             pm.queryIntentActivities(intent, flags).forEach { resolveInfo ->
                 val packageName = resolveInfo.activityInfo.packageName
-
                 if (packageName != context.packageName && resolvedPackages.add(packageName)) {
                     results.add(resolveInfo)
                 }
             }
         }
-
         return results
     }
 
@@ -47,7 +45,6 @@ class BrowserRestrictionsManager(private val context: Context) {
 
     fun getPossibleTorrentApps(): Set<String> {
         val pm = context.packageManager
-
         val magnetIntent = Intent(Intent.ACTION_VIEW, "magnet:?xt=urn:btih:1234567890ABCDEF".toUri())
         val magnetHandlers = pm.queryIntentActivities(magnetIntent, PackageManager.MATCH_DEFAULT_ONLY)
 
@@ -57,7 +54,6 @@ class BrowserRestrictionsManager(private val context: Context) {
         val torrentHandlers = pm.queryIntentActivities(torrentIntent, PackageManager.MATCH_DEFAULT_ONLY)
 
         val suspiciousPackages = (magnetHandlers + torrentHandlers).map { it.activityInfo.packageName }.toSet()
-
         return suspiciousPackages
     }
 
@@ -76,10 +72,16 @@ class BrowserRestrictionsManager(private val context: Context) {
     }
 
     fun applyRestrictions(installed: Boolean = false) {
+        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val adminName = ComponentName(context, io.github.warleysr.dechainer.DechainerDeviceAdminReceiver::class.java)
+
+        // Prevent SecurityException if the app is not the Device Owner
+        if (!dpm.isAdminActive(adminName) || !dpm.isDeviceOwnerApp(adminName.packageName)) return
+
         val prefs = context.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
         val json = prefs.getString("blocked_lists_json", null) ?: return
-
         val allSites = mutableSetOf<String>()
+
         try {
             val array = JSONArray(json)
             for (i in 0 until array.length()) {
@@ -92,14 +94,15 @@ class BrowserRestrictionsManager(private val context: Context) {
 
         val urlRestrictions = Bundle().apply {
             putStringArray("URLBlocklist", allSites.toTypedArray())
-
             if (installed)
                 putBoolean("ForceGoogleSafeSearch", true)
         }
 
         val viewModel = DeviceOwnerViewModel()
         getPossibleBrowsers().forEach { info ->
-            viewModel.setApplicationRestrictions(info.activityInfo.packageName, urlRestrictions)
+            try {
+                viewModel.setApplicationRestrictions(info.activityInfo.packageName, urlRestrictions)
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 }
