@@ -1,5 +1,6 @@
 package io.github.warleysr.dechainer
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
 import android.app.admin.DevicePolicyManager
@@ -18,6 +19,7 @@ import android.os.SystemClock
 import android.os.UserManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import androidx.annotation.RequiresPermission
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -49,7 +51,6 @@ class DechainerAccessibilityService : AccessibilityService() {
 
     private var wasTyping: Boolean = false
     private var lastTypedText: String = ""
-    // ---------------------
 
     private val handler = Handler(Looper.getMainLooper())
     private var currentPackage: String? = null
@@ -71,18 +72,52 @@ class DechainerAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private fun updateSensitiveWords() {
-        isSoberUpEnabled = soberUpPrefs?.getBoolean("enabled", false) ?: false
-        val userKeywords = soberUpPrefs?.getStringSet("sensitive_words", emptySet()) ?: emptySet()
-        val baseKeywords = try {
-            resources.openRawResource(R.raw.block_keywords_expanded).bufferedReader().readLines().filter { it.isNotBlank() }
-        } catch (e: Exception) { emptyList() }
-        sensitiveKeywordsList = baseKeywords + userKeywords.toList()
+        val prefs = soberUpPrefs ?: return
+        isSoberUpEnabled = prefs.getBoolean("enabled", false)
+
+        if (!prefs.getBoolean("defaults_loaded", false)) {
+            val baseKeywords = try {
+                resources.openRawResource(R.raw.block_keywords_expanded)
+                    .bufferedReader().readLines()
+                    .map { it.trim().lowercase() }
+                    .filter { it.isNotBlank() }
+                    .toSet()
+            } catch (e: Exception) { emptySet() }
+
+            prefs.edit {
+                putStringSet("sensitive_words", baseKeywords)
+                putBoolean("defaults_loaded", true)
+            }
+            sensitiveKeywordsList = baseKeywords.toList()
+        } else {
+            sensitiveKeywordsList = prefs.getStringSet("sensitive_words", emptySet())?.toList() ?: emptyList()
+        }
     }
 
     private val packageReceiver = object : BroadcastReceiver() {
+        @RequiresPermission(anyOf = [Manifest.permission.REQUEST_DELETE_PACKAGES, Manifest.permission.DELETE_PACKAGES])
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != Intent.ACTION_PACKAGE_ADDED) return
             val packageName = intent.data?.encodedSchemeSpecificPart ?: return
+
+            // --- NEW: Intercept forbidden installations ---
+            // --- NEW: Intercept forbidden installations ---
+            val installPrefs = applicationContext.getSharedPreferences("install_blocker", Context.MODE_PRIVATE)
+            if (installPrefs.getBoolean(packageName, false)) {
+                try {
+                    val packageInstaller = applicationContext.packageManager.packageInstaller
+                    val pendingIntent = android.app.PendingIntent.getBroadcast(
+                        applicationContext,
+                        0,
+                        Intent("io.github.warleysr.dechainer.UNINSTALL_APP"),
+                        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                    )
+                    packageInstaller.uninstall(packageName, pendingIntent.intentSender)
+                } catch (e: Exception) { e.printStackTrace() }
+                return // Exit early since the app shouldn't be here
+            }
+            // ----------------------------------------------
+            // ----------------------------------------------
 
             val manager = BrowserRestrictionsManager(applicationContext)
             val isBrowser = manager.isBrowser(packageName)
@@ -172,7 +207,6 @@ class DechainerAccessibilityService : AccessibilityService() {
         fun traverse(node: AccessibilityNodeInfo?) {
             if (node == null) return
 
-            // ONLY extract text if the node is an editable field (like a URL bar or Search box)
             if (node.isEditable || node.className?.contains("EditText") == true) {
                 if (node.isFocused) {
                     isTyping = true
@@ -195,7 +229,7 @@ class DechainerAccessibilityService : AccessibilityService() {
         val words = blockedWordsPrefs.getStringSet("blocked_words", emptySet()) ?: emptySet()
         forbiddenPatterns = words.associateWith { word ->
             Regex(
-                "(?<![\\\\p{L}\\\\p{N}_])${Regex.escape(word)}(?![\\\\p{L}\\\\p{N}_])",
+                "(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])",
                 RegexOption.IGNORE_CASE
             )
         }
@@ -210,7 +244,7 @@ class DechainerAccessibilityService : AccessibilityService() {
                 if (wordsSet.isNotEmpty()) {
                     passiveMap[pkg] = wordsSet.associateWith { word ->
                         Regex(
-                            "(?<![\\\\p{L}\\\\p{N}_])${Regex.escape(word)}(?![\\\\p{L}\\\\p{N}_])",
+                            "(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])",
                             RegexOption.IGNORE_CASE
                         )
                     }
@@ -358,7 +392,7 @@ class DechainerAccessibilityService : AccessibilityService() {
             if (newPackage != currentPackage) {
                 stopTrackingAndSave()
                 currentPackage = newPackage
-                wasTyping = false // Reset typing state on app switch
+                wasTyping = false
                 lastTypedText = ""
                 sessionStartTime = SystemClock.elapsedRealtime()
                 checkDateReset()
@@ -397,20 +431,16 @@ class DechainerAccessibilityService : AccessibilityService() {
         else if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
             val pkg = currentPackage ?: event.packageName?.toString() ?: return
 
-            // --- SOBER UP BLOCK LOGIC ---
             if (pkg == "com.android.chrome" || browserPackages.contains(pkg)) {
                 if (isSoberUpEnabled) {
                     val extraction = extractSearchBoxTextAndFocus()
 
                     if (extraction.isTyping) {
-                        // User is currently typing in the URL bar/Search box
                         wasTyping = true
                         lastTypedText = extraction.text
                     } else if (wasTyping) {
-                        // User was typing, but focus was just lost (they hit Enter/Search or closed keyboard)
                         wasTyping = false
 
-                        // Fallback to the last typed text if the browser cleared the URL bar on submission
                         val textToCheck = if (extraction.text.isNotBlank()) extraction.text else lastTypedText
                         val matchedWord = sensitiveKeywordsList.firstOrNull { textToCheck.contains(it) }
 
@@ -437,7 +467,38 @@ class DechainerAccessibilityService : AccessibilityService() {
                     }
                 }
             }
-            // ---------------------------------
+
+            // --- NEW: WHATSAPP UPDATES TAB BLOCKER ---
+            if (pkg == "com.whatsapp" && securityPrefs.getBoolean("block_whatsapp_updates", false)) {
+                val rootNode = rootInActiveWindow
+                var isUpdatesTabActive = false
+
+                fun checkWhatsAppTab(node: AccessibilityNodeInfo?) {
+                    if (node == null || isUpdatesTabActive) return
+
+                    val contentDesc = node.contentDescription?.toString() ?: ""
+                    val text = node.text?.toString() ?: ""
+
+                    // Checks if the Updates tab is selected OR if the "Status"/"Channels" headers are on screen
+                    if ((contentDesc.contains("Updates", ignoreCase = true) && node.isSelected) ||
+                        (text == "Channels" && node.className?.contains("TextView") == true)) {
+                        isUpdatesTabActive = true
+                    }
+
+                    for (i in 0 until node.childCount) checkWhatsAppTab(node.getChild(i))
+                }
+
+                rootNode?.let {
+                    checkWhatsAppTab(it)
+                    it.recycle()
+                }
+
+                if (isUpdatesTabActive) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    return
+                }
+            }
+            // -----------------------------------------
 
             if (!targetPackages.contains(pkg)) return
 

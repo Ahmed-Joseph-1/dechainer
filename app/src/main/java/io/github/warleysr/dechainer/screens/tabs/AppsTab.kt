@@ -27,6 +27,7 @@ import io.github.warleysr.dechainer.models.AppItem
 import io.github.warleysr.dechainer.viewmodels.AppsViewModel
 import io.github.warleysr.dechainer.viewmodels.DeviceOwnerViewModel
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MoreVert
@@ -38,12 +39,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
-
 import android.content.RestrictionEntry
 import android.os.Bundle
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material.icons.filled.Block
+import android.widget.Toast
 
 @Composable
 fun AppsTab(
@@ -63,6 +64,11 @@ fun AppsScreen(viewModel: AppsViewModel, deviceOwnerViewModel: DeviceOwnerViewMo
     var selectedApp by remember { mutableStateOf<AppItem?>(null) }
     var showTimeLimitDialog by remember { mutableStateOf<AppItem?>(null) }
     var showRestrictionsDialog by remember { mutableStateOf<AppItem?>(null) }
+
+//    var showUninstallBlockDialog by remember { mutableStateOf(false) }
+//    var showManagePreventedDialog by remember { mutableStateOf(false) }
+    var showPreventAppDialog by remember { mutableStateOf(false) }
+
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showSystemApps by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
@@ -71,10 +77,10 @@ fun AppsScreen(viewModel: AppsViewModel, deviceOwnerViewModel: DeviceOwnerViewMo
     val filteredApps = remember(viewModel.apps, searchQuery, showSystemApps) {
         viewModel.apps.filter {
             (showSystemApps || !it.isSystem || it.isHidden || it.isUninstallBlocked || it.timeLimitMinutes > 0) &&
-            (it.name.contains(searchQuery, ignoreCase = true) ||
-            it.packageName.contains(searchQuery, ignoreCase = true))
+                    (it.name.contains(searchQuery, ignoreCase = true) ||
+                            it.packageName.contains(searchQuery, ignoreCase = true))
         }
-        .sortedBy { it.timeLimitMinutes == 0 }
+            .sortedBy { it.timeLimitMinutes == 0 }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -109,6 +115,13 @@ fun AppsScreen(viewModel: AppsViewModel, deviceOwnerViewModel: DeviceOwnerViewMo
                             },
                             trailingIcon = {
                                 Checkbox(checked = showSystemApps, onCheckedChange = null)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Manage Prevented Apps") },
+                            onClick = {
+                                showPreventAppDialog = true
+                                showMenu = false
                             }
                         )
                     }
@@ -184,6 +197,28 @@ fun AppsScreen(viewModel: AppsViewModel, deviceOwnerViewModel: DeviceOwnerViewMo
         )
     }
 
+    if (showPreventAppDialog) {
+        PreventAppDialog(
+            viewModel = viewModel,
+            onDismiss = { showPreventAppDialog = false },
+            onToggleSubmit = { pkg ->
+                val isRemoving = viewModel.preventedPackages.contains(pkg)
+                if (isRemoving) {
+                    pendingAction = {
+                        viewModel.removeInstallationBlock(pkg)
+                        Toast.makeText(context, "$pkg block removed.", Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    pendingAction = {
+                        viewModel.blockFutureInstallations(pkg)
+                        Toast.makeText(context, "$pkg added to installation blocklist.", Toast.LENGTH_LONG).show()
+                    }
+                }
+                showPreventAppDialog = false
+            }
+        )
+    }
+
     if (pendingAction != null) {
         val storedCode = SecurityManager.getRecoveryCode(context)
         if (storedCode == null) {
@@ -207,6 +242,93 @@ fun AppsScreen(viewModel: AppsViewModel, deviceOwnerViewModel: DeviceOwnerViewMo
 }
 
 @Composable
+fun PreventAppDialog(
+    viewModel: AppsViewModel,
+    onDismiss: () -> Unit,
+    onToggleSubmit: (String) -> Unit
+) {
+    var singlePkgInput by remember { mutableStateOf("") }
+    var pkgSearchQuery by remember { mutableStateOf("") }
+
+    // Strict Regex validation for Android Package Names
+    val packageRegex = "^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$".toRegex()
+    val isPkgValid = singlePkgInput.matches(packageRegex)
+
+    val filteredApps = remember(viewModel.apps, pkgSearchQuery) {
+        if (pkgSearchQuery.isBlank()) emptyList()
+        else viewModel.apps.filter {
+            it.name.contains(pkgSearchQuery, ignoreCase = true) ||
+                    it.packageName.contains(pkgSearchQuery, ignoreCase = true)
+        }.take(5)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Manage Prevented Apps") },
+        text = {
+            Column {
+                Text(
+                    "Type a package name to block and uninstall it. If it is already blocked, typing it will remove the block.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(16.dp))
+
+                OutlinedTextField(
+                    value = singlePkgInput,
+                    onValueChange = {
+                        singlePkgInput = it
+                        pkgSearchQuery = it
+                    },
+                    label = { Text("Enter Package Name (e.g. com.example.app)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    isError = singlePkgInput.isNotEmpty() && !isPkgValid,
+                    supportingText = {
+                        if (singlePkgInput.isNotEmpty() && !isPkgValid) {
+                            Text("Invalid package name format", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                )
+
+                if (filteredApps.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column {
+                            filteredApps.forEach { app ->
+                                ListItem(
+                                    modifier = Modifier.clickable {
+                                        singlePkgInput = app.packageName
+                                        pkgSearchQuery = ""
+                                    },
+                                    headlineContent = { Text(app.name) },
+                                    supportingContent = { Text(app.packageName) },
+                                    leadingContent = {
+                                        Image(
+                                            bitmap = app.icon.toBitmap().asImageBitmap(),
+                                            contentDescription = null,
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = isPkgValid,
+                onClick = { onToggleSubmit(singlePkgInput.trim()) }
+            ) { Text("Add / Remove Block") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        }
+    )
+}
+
+@Composable
 fun AppRestrictionsDialog(
     app: AppItem,
     viewModel: DeviceOwnerViewModel,
@@ -215,17 +337,17 @@ fun AppRestrictionsDialog(
 ) {
     val availableRestrictions = remember { viewModel.getAvailableRestrictions(app.packageName) }
     val currentRestrictions = remember { viewModel.getApplicationRestrictions(app.packageName) }
-    
+
     var searchQuery by remember { mutableStateOf("") }
-    
+
     val filteredRestrictions = remember(availableRestrictions, searchQuery) {
         availableRestrictions.filter { entry ->
             entry.title?.contains(searchQuery, ignoreCase = true) == true ||
-            entry.key.contains(searchQuery, ignoreCase = true)
+                    entry.key.contains(searchQuery, ignoreCase = true)
         }
     }
-    
-    val selectedRestrictions = remember { 
+
+    val selectedRestrictions = remember {
         val map = mutableStateMapOf<String, Boolean>()
         availableRestrictions.forEach { entry ->
             if (entry.type == RestrictionEntry.TYPE_BOOLEAN) {
@@ -343,7 +465,7 @@ fun AppRow(app: AppItem, onClick: () -> Unit) {
     ListItem(
         modifier = Modifier.clickable(onClick = onClick),
         headlineContent = { Text(app.name) },
-        supportingContent = { 
+        supportingContent = {
             Column {
                 Text(app.packageName, style = MaterialTheme.typography.bodySmall)
                 if (app.timeLimitMinutes > 0) {
@@ -594,7 +716,7 @@ fun NumberPickerWheel(
                         MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
                     )
             )
-            
+
             LazyColumn(
                 state = listState,
                 flingBehavior = snapFlingBehavior,

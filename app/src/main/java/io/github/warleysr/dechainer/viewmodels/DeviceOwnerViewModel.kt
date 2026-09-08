@@ -154,14 +154,32 @@ class DeviceOwnerViewModel() : ViewModel() {
             })
     }
 
+//    fun setPrivateDNS(host: String): Int {
+//        return dpm.setGlobalPrivateDnsModeSpecifiedHost(adminName, host)
+//    }
+//
+//    fun getPrivateDNS(): String? {
+//        if (dpm.getGlobalPrivateDnsMode(adminName) != DevicePolicyManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME)
+//            return null
+//        return dpm.getGlobalPrivateDnsHost(adminName)
+//    }
+
     fun setPrivateDNS(host: String): Int {
-        return dpm.setGlobalPrivateDnsModeSpecifiedHost(adminName, host)
+        return try {
+            dpm.setGlobalPrivateDnsModeSpecifiedHost(adminName, host)
+        } catch (e: Exception) {
+            2 // DevicePolicyManager.PRIVATE_DNS_SET_ERROR_FAILURE
+        }
     }
 
     fun getPrivateDNS(): String? {
-        if (dpm.getGlobalPrivateDnsMode(adminName) != DevicePolicyManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME)
-            return null
-        return dpm.getGlobalPrivateDnsHost(adminName)
+        return try {
+            if (dpm.getGlobalPrivateDnsMode(adminName) != DevicePolicyManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME)
+                return null
+            dpm.getGlobalPrivateDnsHost(adminName)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     fun getAllAccountsViaShizuku(): List<Pair<String, String>> {

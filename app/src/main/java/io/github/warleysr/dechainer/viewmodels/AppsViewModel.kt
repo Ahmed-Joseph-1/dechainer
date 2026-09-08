@@ -1,8 +1,11 @@
 package io.github.warleysr.dechainer.viewmodels
 
+import android.annotation.SuppressLint
+import android.app.PendingIntent
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
@@ -20,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.content.edit
 import java.util.concurrent.TimeUnit
+import android.os.Bundle
 
 class AppsViewModel : ViewModel() {
     private val context = DechainerApplication.getInstance()
@@ -29,8 +33,10 @@ class AppsViewModel : ViewModel() {
 
     var apps by mutableStateOf<List<AppItem>>(emptyList())
         private set
-
     var isLoading by mutableStateOf(false)
+        private set
+
+    var preventedPackages by mutableStateOf<List<String>>(emptyList())
         private set
 
     init {
@@ -47,6 +53,11 @@ class AppsViewModel : ViewModel() {
                     emptyList()
                 }
             }
+
+            // Load prevented packages
+            val installPrefs = context.getSharedPreferences("install_blocker", Context.MODE_PRIVATE)
+            preventedPackages = installPrefs.all.keys.toList().sorted()
+
             isLoading = false
         }
     }
@@ -94,10 +105,8 @@ class AppsViewModel : ViewModel() {
     fun getAppUsage(packageName: String, inMinutes: Boolean = false): Long {
         val prefs = context.getSharedPreferences("internal_usage_stats", Context.MODE_PRIVATE)
         val used = prefs.getLong(packageName, 0L)
-
         if (inMinutes)
             return TimeUnit.MILLISECONDS.toMinutes(used)
-
         return used
     }
 
@@ -109,5 +118,54 @@ class AppsViewModel : ViewModel() {
 
     fun getAppReopenTime(packageName: String): Int {
         return context.getSharedPreferences("reopen_times", Context.MODE_PRIVATE).getInt(packageName, 0)
+    }
+
+    // --- NEW: UNINSTALL & BLOCK INSTALLATION FEATURE ---
+    @SuppressLint("MissingPermission")
+    fun blockFutureInstallations(packageName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // 1. Uninstall the app silently if it exists
+                try {
+                    val packageInstaller = packageManager.packageInstaller
+                    val pendingIntent = PendingIntent.getBroadcast(
+                        context,
+                        0,
+                        Intent("io.github.warleysr.dechainer.UNINSTALL_APP"),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                    packageInstaller.uninstall(packageName, pendingIntent.intentSender)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+
+                // 2. Instruct the DeviceOwner to block this app from being installed
+                dpm.setUninstallBlocked(adminName, packageName, false)
+                dpm.setApplicationHidden(adminName, packageName, true)
+
+                context.getSharedPreferences("install_blocker", Context.MODE_PRIVATE).edit {
+                    putBoolean(packageName, true)
+                }
+
+                loadApps()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun removeInstallationBlock(packageName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                dpm.setApplicationHidden(adminName, packageName, false)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            context.getSharedPreferences("install_blocker", Context.MODE_PRIVATE).edit {
+                remove(packageName)
+            }
+            loadApps()
+        }
     }
 }

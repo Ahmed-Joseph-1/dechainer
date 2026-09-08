@@ -46,7 +46,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration.Companion.milliseconds
-
+import androidx.compose.material.icons.outlined.VisibilityOff
 @Composable
 fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
     var showDnsDialog by remember { mutableStateOf(false) }
@@ -71,6 +71,8 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
     val securityPrefs = remember { context.getSharedPreferences("security_prefs", Context.MODE_PRIVATE) }
     var shuffleKeyboard by remember { mutableStateOf(securityPrefs.getBoolean("shuffle_keyboard", false)) }
     var blockTorrents by remember { mutableStateOf(securityPrefs.getBoolean("block_torrents", false)) }
+
+    var blockWhatsAppUpdates by remember { mutableStateOf(securityPrefs.getBoolean("block_whatsapp_updates", false)) }
 
     val advancedBlocking = DechainerAccessibilityService.isRunning
     var impulseMode by remember { mutableStateOf(SecurityManager.getImpulseLockMode(context)) }
@@ -161,6 +163,25 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
             }
             // -----------------------------
+
+            item {
+                ListItem(
+                    headlineContent = { Text("Block WhatsApp Updates") },
+                    supportingContent = { Text("Prevent access to the WhatsApp Updates tab") },
+                    leadingContent = { Icon(Icons.Outlined.VisibilityOff, "") },
+                    trailingContent = {
+                        Switch(
+                            checked = blockWhatsAppUpdates,
+                            onCheckedChange = { checked ->
+                                // Executed directly without 'pendingAction' to bypass the recovery key
+                                blockWhatsAppUpdates = checked
+                                securityPrefs.edit { putBoolean("block_whatsapp_updates", checked) }
+                            }
+                        )
+                    }
+                )
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            }
 
             item {
                 ListItem(
@@ -291,9 +312,20 @@ fun ConfigTab(viewModel: DeviceOwnerViewModel = viewModel()) {
 
     if (showSoberUpDialog) {
         val prefs = context.getSharedPreferences("sober_up_prefs", Context.MODE_PRIVATE)
+
+        if (!prefs.getBoolean("defaults_loaded", false)) {
+            val baseKeywords = try {
+                context.resources.openRawResource(R.raw.block_keywords_expanded)
+                    .bufferedReader().readLines()
+                    .map { it.trim().lowercase() }
+                    .filter { it.isNotBlank() }
+                    .toSet()
+            } catch (e: Exception) { emptySet() }
+            prefs.edit().putStringSet("sensitive_words", baseKeywords).putBoolean("defaults_loaded", true).apply()
+        }
+
         val currentDuration = prefs.getInt("duration", 1)
         var currentWordsSet by remember { mutableStateOf(prefs.getStringSet("sensitive_words", emptySet()) ?: emptySet()) }
-
         SoberUpDialog(
             currentDuration = currentDuration,
             currentWordsSet = currentWordsSet,
