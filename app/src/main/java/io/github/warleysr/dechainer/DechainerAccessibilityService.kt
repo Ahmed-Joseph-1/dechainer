@@ -3,6 +3,7 @@ package io.github.warleysr.dechainer
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
+import android.app.PendingIntent
 import android.app.admin.DevicePolicyManager
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -11,12 +12,15 @@ import android.content.Intent
 import android.content.Intent.FLAG_ACTIVITY_NEW_TASK
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.os.UserManager
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.annotation.RequiresPermission
@@ -29,20 +33,28 @@ import java.util.concurrent.TimeUnit
 import androidx.core.content.edit
 import io.github.warleysr.dechainer.activities.AccessibilityRequestActivity
 import io.github.warleysr.dechainer.activities.BlockedWordActivity
+import io.github.warleysr.dechainer.activities.NsfwContentBlockedActivity
 import io.github.warleysr.dechainer.activities.ReopeningLimitActivity
 import io.github.warleysr.dechainer.activities.TimeUpActivity
+import io.github.warleysr.dechainer.utils.NetworkBlockManager
+import io.github.warleysr.dechainer.utils.NsfwContentDetector
 import io.github.warleysr.dechainer.utils.PlayStoreRatingFetcher
+import io.github.warleysr.dechainer.utils.VisualBlockingSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import rikka.shizuku.shared.BuildConfig
+import timber.log.Timber
+import java.util.concurrent.Executors
 import kotlin.math.max
-import io.github.warleysr.dechainer.utils.NetworkBlockManager
 
 @SuppressLint("AccessibilityPolicy")
 class DechainerAccessibilityService : AccessibilityService() {
 
+    // --- SOBER UP & CUSTOM BLOCKING PROPERTIES ---
     @Volatile private var isNetworkBlocking = false
     private var soberUpPrefs: SharedPreferences? = null
     private var isSoberUpEnabled = false
@@ -52,6 +64,7 @@ class DechainerAccessibilityService : AccessibilityService() {
     private var wasTyping: Boolean = false
     private var lastTypedText: String = ""
 
+    // --- STANDARD PROPERTIES ---
     private val handler = Handler(Looper.getMainLooper())
     private var currentPackage: String? = null
     private var sessionStartTime: Long = 0
@@ -64,6 +77,20 @@ class DechainerAccessibilityService : AccessibilityService() {
     private lateinit var blockedWordsPrefs: SharedPreferences
     private lateinit var securityPrefs: SharedPreferences
     private lateinit var ratingPrefs: SharedPreferences
+
+    // --- VISUAL BLOCKING PROPERTIES ---
+    private lateinit var visualBlockingPrefs: SharedPreferences
+    private var nsfwDetector: NsfwContentDetector? = null
+    private var lastNsfwScanElapsedMs = 0L
+    private var nsfwEnabled: Boolean = false
+    private var nsfwTargetPackages: Set<String> = VisualBlockingSettings.DEFAULT_TARGET_PACKAGES
+    private var nsfwCategories: Set<String> = VisualBlockingSettings.DEFAULT_CATEGORIES
+    private var nsfwThreshold: Float = VisualBlockingSettings.DEFAULT_THRESHOLD
+
+    private val nsfwDispatcher = Executors.newSingleThreadExecutor { r -> Thread(r, "NsfwDetector") }.asCoroutineDispatcher()
+
+    @Volatile
+    private var nsfwScanInFlight = false
 
     private var forbiddenPatterns: Map<String, Regex> = emptyMap()
     private var passiveForbiddenPatterns: Map<String, Map<String, Regex>> = emptyMap()
@@ -101,22 +128,20 @@ class DechainerAccessibilityService : AccessibilityService() {
             val packageName = intent.data?.encodedSchemeSpecificPart ?: return
 
             // --- NEW: Intercept forbidden installations ---
-            // --- NEW: Intercept forbidden installations ---
-            val installPrefs = applicationContext.getSharedPreferences("install_blocker", Context.MODE_PRIVATE)
+            val installPrefs = applicationContext.getSharedPreferences("install_blocker", MODE_PRIVATE)
             if (installPrefs.getBoolean(packageName, false)) {
                 try {
                     val packageInstaller = applicationContext.packageManager.packageInstaller
-                    val pendingIntent = android.app.PendingIntent.getBroadcast(
+                    val pendingIntent = PendingIntent.getBroadcast(
                         applicationContext,
                         0,
                         Intent("io.github.warleysr.dechainer.UNINSTALL_APP"),
-                        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                     )
                     packageInstaller.uninstall(packageName, pendingIntent.intentSender)
                 } catch (e: Exception) { e.printStackTrace() }
-                return // Exit early since the app shouldn't be here
+                return
             }
-            // ----------------------------------------------
             // ----------------------------------------------
 
             val manager = BrowserRestrictionsManager(applicationContext)
@@ -128,10 +153,8 @@ class DechainerAccessibilityService : AccessibilityService() {
                     manager.applyRestrictions(installed = true)
                     return
                 }
-
                 suspendPackage(packageName)
-            }
-            else {
+            } else {
                 val isTorrentApp = manager.isTorrentApp(packageName)
                 if (isTorrentApp && securityPrefs.getBoolean("block_torrents", false))
                     suspendPackage(packageName)
@@ -142,12 +165,10 @@ class DechainerAccessibilityService : AccessibilityService() {
                 serviceScope.launch(Dispatchers.IO) {
                     try {
                         val info = PlayStoreRatingFetcher.fetch(packageName)
-
                         if (info.hasExplicitContent && info.contentRating == "Rated 18+")
                             withContext(Dispatchers.Main) {
                                 suspendPackage(packageName)
                             }
-
                         ratingPrefs.edit { putBoolean(packageName, info.hasExplicitContent) }
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -167,7 +188,6 @@ class DechainerAccessibilityService : AccessibilityService() {
                     stopTrackingAndSave(screenOff = true)
                     currentPackage = null
                 }
-
                 Intent.ACTION_SCREEN_ON -> {
                     lastForegroundPackage?.let {
                         currentPackage = it
@@ -188,50 +208,30 @@ class DechainerAccessibilityService : AccessibilityService() {
                     currentPackage?.let { startTracking(it) }
                 }
             }
-            blockedWordsPrefs -> {
-                updateForbiddenPatterns()
-            }
-            soberUpPrefs -> {
-                updateSensitiveWords()
-            }
+            blockedWordsPrefs -> updateForbiddenPatterns()
+            visualBlockingPrefs -> updateVisualBlockingSettings()
+            soberUpPrefs -> updateSensitiveWords()
         }
     }
 
-    data class ScreenExtraction(val text: String, val isTyping: Boolean)
-
-    private fun extractSearchBoxTextAndFocus(): ScreenExtraction {
-        val rootNode = rootInActiveWindow ?: return ScreenExtraction("", false)
-        val sb = StringBuilder()
-        var isTyping = false
-
-        fun traverse(node: AccessibilityNodeInfo?) {
-            if (node == null) return
-
-            if (node.isEditable || node.className?.contains("EditText") == true) {
-                if (node.isFocused) {
-                    isTyping = true
-                }
-                node.text?.let { sb.append(it).append(" ") }
-            }
-
-            for (i in 0 until node.childCount) {
-                traverse(node.getChild(i))
-            }
-        }
-
-        traverse(rootNode)
-        rootNode.recycle()
-        return ScreenExtraction(sb.toString().lowercase(), isTyping)
+    private fun updateVisualBlockingSettings() {
+        nsfwEnabled = visualBlockingPrefs.getBoolean(VisualBlockingSettings.KEY_ENABLED, false)
+        nsfwTargetPackages = visualBlockingPrefs.getStringSet(
+            VisualBlockingSettings.KEY_TARGET_PACKAGES, VisualBlockingSettings.DEFAULT_TARGET_PACKAGES
+        ) ?: VisualBlockingSettings.DEFAULT_TARGET_PACKAGES
+        nsfwCategories = visualBlockingPrefs.getStringSet(
+            VisualBlockingSettings.KEY_CATEGORIES, VisualBlockingSettings.DEFAULT_CATEGORIES
+        ) ?: VisualBlockingSettings.DEFAULT_CATEGORIES
+        nsfwThreshold = visualBlockingPrefs.getFloat(
+            VisualBlockingSettings.KEY_THRESHOLD, VisualBlockingSettings.DEFAULT_THRESHOLD
+        )
     }
 
     private fun updateForbiddenPatterns() {
         browserPackages = BrowserRestrictionsManager(applicationContext).getPossibleBrowsers().map { it.activityInfo.packageName }.toSet()
         val words = blockedWordsPrefs.getStringSet("blocked_words", emptySet()) ?: emptySet()
         forbiddenPatterns = words.associateWith { word ->
-            Regex(
-                "(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])",
-                RegexOption.IGNORE_CASE
-            )
+            Regex("(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])", RegexOption.IGNORE_CASE)
         }
         targetPackages = blockedWordsPrefs.getStringSet("target_packages", emptySet()) ?: emptySet()
 
@@ -243,10 +243,7 @@ class DechainerAccessibilityService : AccessibilityService() {
                 val wordsSet = (value as? Set<*>)?.filterIsInstance<String>()?.toSet() ?: emptySet()
                 if (wordsSet.isNotEmpty()) {
                     passiveMap[pkg] = wordsSet.associateWith { word ->
-                        Regex(
-                            "(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])",
-                            RegexOption.IGNORE_CASE
-                        )
+                        Regex("(?<![\\p{L}\\p{N}_])${Regex.escape(word)}(?![\\p{L}\\p{N}_])", RegexOption.IGNORE_CASE)
                     }
                 }
             }
@@ -254,17 +251,49 @@ class DechainerAccessibilityService : AccessibilityService() {
         passiveForbiddenPatterns = passiveMap
     }
 
-    private val blockRunnable = Runnable {
-        executeBlocking()
+    data class ScreenExtraction(val text: String, val isTyping: Boolean)
+
+    private fun extractSearchBoxTextAndFocus(): ScreenExtraction {
+        val rootNode = rootInActiveWindow ?: return ScreenExtraction("", false)
+        val sb = StringBuilder()
+        var isTyping = false
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            if (node.isEditable || node.className?.contains("EditText") == true) {
+                if (node.isFocused) isTyping = true
+                node.text?.let { sb.append(it).append(" ") }
+            }
+            for (i in 0 until node.childCount) traverse(node.getChild(i))
+        }
+
+        traverse(rootNode)
+        rootNode.recycle()
+        return ScreenExtraction(sb.toString().lowercase(), isTyping)
     }
 
+    private val blockRunnable = Runnable { executeBlocking() }
+
     companion object {
+        private const val NSFW_SCAN_INTERVAL_MS = 2000L
+        private val NSFW_MEDIA_CLASS_KEYWORDS = listOf("Image", "Photo", "Video", "Media", "Player", "Gif", "TextureView", "SurfaceView", "WebView")
+        private val NSFW_MEDIA_KEYWORDS = listOf("imagem", "image", "picture", "foto", "photo", "vídeo", "video", "gif", "media", "mídia")
+        private val NSFW_MEDIA_DESCRIPTION_PATTERNS = listOf(
+            Regex("""^\d{1,2}\+,"""),
+            Regex("postado (no|em)", RegexOption.IGNORE_CASE),
+            Regex("posted (in|to)", RegexOption.IGNORE_CASE)
+        )
+        private const val NSFW_FALLBACK_MIN_ASPECT = 0.4f
+        private const val NSFW_FALLBACK_MAX_ASPECT = 3.0f
+        private const val NSFW_FALLBACK_MAX_CANDIDATES = 5
+        private const val NSFW_MIN_MEDIA_SIZE_DP = 96
+        private const val NSFW_DIAG_MIN_SIZE_DP = 48
+        private const val NSFW_DIAG_MAX_NODES = 40
+
         var isRunning by mutableStateOf(false)
             private set
-
         var disablingService = false
             private set
-
         var checkingRating = false
             private set
 
@@ -272,11 +301,7 @@ class DechainerAccessibilityService : AccessibilityService() {
 
         val accessedActivities = mutableStateListOf<ActivityLog>()
 
-        data class ActivityLog(
-            val packageName: String,
-            val className: String,
-            val timestamp: Long = System.currentTimeMillis()
-        )
+        data class ActivityLog(val packageName: String, val className: String, val timestamp: Long = System.currentTimeMillis())
 
         private fun addLog(packageName: String, className: String) {
             if (accessedActivities.any { it.packageName == packageName && it.className == className }) {
@@ -298,13 +323,16 @@ class DechainerAccessibilityService : AccessibilityService() {
         blockedWordsPrefs = getSharedPreferences("blocked_words_prefs", MODE_PRIVATE)
         securityPrefs = getSharedPreferences("security_prefs", MODE_PRIVATE)
         ratingPrefs = getSharedPreferences("app_ratings", MODE_PRIVATE)
+        visualBlockingPrefs = getSharedPreferences(VisualBlockingSettings.PREFS_NAME, MODE_PRIVATE)
         soberUpPrefs = getSharedPreferences("sober_up_prefs", MODE_PRIVATE)
 
         limitPrefs.registerOnSharedPreferenceChangeListener(prefsListener)
         blockedWordsPrefs.registerOnSharedPreferenceChangeListener(prefsListener)
+        visualBlockingPrefs.registerOnSharedPreferenceChangeListener(prefsListener)
         soberUpPrefs?.registerOnSharedPreferenceChangeListener(prefsListener)
 
         updateForbiddenPatterns()
+        updateVisualBlockingSettings()
         updateSensitiveWords()
 
         val blockedPackages = getControlledPackages()
@@ -351,8 +379,16 @@ class DechainerAccessibilityService : AccessibilityService() {
         unregisterReceiver(screenReceiver)
         limitPrefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         blockedWordsPrefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        visualBlockingPrefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         soberUpPrefs?.unregisterOnSharedPreferenceChangeListener(prefsListener)
         stopTrackingAndSave()
+
+        val detectorToClose = nsfwDetector
+        nsfwDetector = null
+        if (detectorToClose != null) {
+            serviceScope.launch(nsfwDispatcher) { detectorToClose.close() }
+        }
+        nsfwDispatcher.close()
         isRunning = false
 
         if (!disablingService) {
@@ -397,14 +433,16 @@ class DechainerAccessibilityService : AccessibilityService() {
                 sessionStartTime = SystemClock.elapsedRealtime()
                 checkDateReset()
                 startTracking(newPackage)
+
+                if (nsfwEnabled && newPackage in nsfwTargetPackages) {
+                    warmUpNsfwDetector()
+                }
             }
 
             if (className.contains("Activity", ignoreCase = true)) {
                 addLog(newPackage, className)
-                val blockerPrefs =
-                    getSharedPreferences("activity_blocker_prefs", MODE_PRIVATE)
-                val blockedActivities =
-                    blockerPrefs.getStringSet("blocked_activities", emptySet()) ?: emptySet()
+                val blockerPrefs = getSharedPreferences("activity_blocker_prefs", MODE_PRIVATE)
+                val blockedActivities = blockerPrefs.getStringSet("blocked_activities", emptySet()) ?: emptySet()
 
                 if (blockedActivities.contains(className))
                     performGlobalAction(GLOBAL_ACTION_BACK)
@@ -431,22 +469,20 @@ class DechainerAccessibilityService : AccessibilityService() {
         else if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
             val pkg = currentPackage ?: event.packageName?.toString() ?: return
 
+            // --- SOBER UP: Browser & Search Block ---
             if (pkg == "com.android.chrome" || browserPackages.contains(pkg)) {
                 if (isSoberUpEnabled) {
                     val extraction = extractSearchBoxTextAndFocus()
-
                     if (extraction.isTyping) {
                         wasTyping = true
                         lastTypedText = extraction.text
                     } else if (wasTyping) {
                         wasTyping = false
-
                         val textToCheck = if (extraction.text.isNotBlank()) extraction.text else lastTypedText
                         val matchedWord = sensitiveKeywordsList.firstOrNull { textToCheck.contains(it) }
 
                         if (matchedWord != null && !isNetworkBlocking) {
                             isNetworkBlocking = true
-
                             performGlobalAction(GLOBAL_ACTION_BACK)
                             performGlobalAction(GLOBAL_ACTION_BACK)
 
@@ -459,32 +495,26 @@ class DechainerAccessibilityService : AccessibilityService() {
                             }
                             startActivity(intentActivity)
 
-                            handler.postDelayed({
-                                isNetworkBlocking = false
-                            }, 2000)
+                            handler.postDelayed({ isNetworkBlocking = false }, 2000)
                             return
                         }
                     }
                 }
             }
 
-            // --- NEW: WHATSAPP UPDATES TAB BLOCKER ---
+            // --- WHATSAPP UPDATES TAB BLOCKER ---
             if (pkg == "com.whatsapp" && securityPrefs.getBoolean("block_whatsapp_updates", false)) {
                 val rootNode = rootInActiveWindow
                 var isUpdatesTabActive = false
 
                 fun checkWhatsAppTab(node: AccessibilityNodeInfo?) {
                     if (node == null || isUpdatesTabActive) return
-
                     val contentDesc = node.contentDescription?.toString() ?: ""
                     val text = node.text?.toString() ?: ""
-
-                    // Checks if the Updates tab is selected OR if the "Status"/"Channels" headers are on screen
                     if ((contentDesc.contains("Updates", ignoreCase = true) && node.isSelected) ||
                         (text == "Channels" && node.className?.contains("TextView") == true)) {
                         isUpdatesTabActive = true
                     }
-
                     for (i in 0 until node.childCount) checkWhatsAppTab(node.getChild(i))
                 }
 
@@ -498,7 +528,11 @@ class DechainerAccessibilityService : AccessibilityService() {
                     return
                 }
             }
-            // -----------------------------------------
+
+            // --- VISUAL BLOCKING SCANNER ---
+            if (nsfwEnabled && pkg in nsfwTargetPackages && event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                maybeScanForNsfwContent(pkg)
+            }
 
             if (!targetPackages.contains(pkg)) return
 
@@ -507,12 +541,10 @@ class DechainerAccessibilityService : AccessibilityService() {
                 serviceScope.launch(Dispatchers.IO) {
                     try {
                         val info = PlayStoreRatingFetcher.fetch(pkg)
-
                         if (info.hasExplicitContent && info.contentRating == "Rated 18+")
                             withContext(Dispatchers.Main) {
                                 suspendPackage(pkg)
                             }
-
                         ratingPrefs.edit { putBoolean(pkg, info.hasExplicitContent) }
                         checkingRating = false
                     } catch (e: Exception) {
@@ -565,6 +597,175 @@ class DechainerAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun warmUpNsfwDetector() {
+        if (nsfwDetector != null) return
+        serviceScope.launch(nsfwDispatcher) {
+            if (nsfwDetector == null) {
+                nsfwDetector = NsfwContentDetector(applicationContext)
+            }
+        }
+    }
+
+    private fun maybeScanForNsfwContent(pkg: String) {
+        if (nsfwScanInFlight) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastNsfwScanElapsedMs < NSFW_SCAN_INTERVAL_MS) return
+        lastNsfwScanElapsedMs = now
+        nsfwScanInFlight = true
+
+        serviceScope.launch {
+            val mediaRegions = findNsfwMediaRegions()
+            if (mediaRegions.isEmpty()) {
+                nsfwScanInFlight = false
+                return@launch
+            }
+
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val hardwareBitmap = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                    result.hardwareBuffer.close()
+
+                    if (hardwareBitmap == null) {
+                        Timber.w("NSFW scan: failed to wrap screenshot hardware buffer")
+                        nsfwScanInFlight = false
+                        return
+                    }
+
+                    serviceScope.launch(nsfwDispatcher) {
+                        try {
+                            val softwareBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                            hardwareBitmap.recycle()
+
+                            val detector = nsfwDetector ?: NsfwContentDetector(applicationContext).also { nsfwDetector = it }
+
+                            var maxUnsafeScore = 0f
+                            for (region in mediaRegions) {
+                                val crop = cropToBitmap(softwareBitmap, region) ?: continue
+
+                                val startMs = SystemClock.elapsedRealtime()
+                                val scores = detector.predict(crop)
+                                val elapsedMs = SystemClock.elapsedRealtime() - startMs
+                                crop.recycle()
+
+                                val categories = nsfwCategories
+                                val threshold = nsfwThreshold
+                                val unsafeScore = detector.unsafeScore(scores, categories)
+                                val scoresText = NsfwContentDetector.LABELS.zip(scores.toList())
+                                    .joinToString { (label, score) -> "$label=${"%.3f".format(score)}" }
+                                Timber.d("NSFW scan region=$region (${elapsedMs}ms): $scoresText, unsafe(${categories.joinToString("+")})=${"%.3f".format(unsafeScore)}")
+
+                                if (unsafeScore > maxUnsafeScore) maxUnsafeScore = unsafeScore
+                                if (unsafeScore > threshold) break
+                            }
+                            softwareBitmap.recycle()
+
+                            if (maxUnsafeScore > nsfwThreshold) {
+                                Timber.d("NSFW scan: blocking (max unsafe score=${"%.3f".format(maxUnsafeScore)})")
+                                withContext(Dispatchers.Main) {
+                                    if (currentPackage in nsfwTargetPackages) {
+                                        suspendPackage(pkg)
+                                        suspendPackage(pkg, suspend = false)
+                                        showNsfwBlockedActivity()
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Timber.e(e, "NSFW scan failed")
+                        } finally {
+                            nsfwScanInFlight = false
+                        }
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    Timber.w("NSFW scan: takeScreenshot failed, errorCode=$errorCode")
+                    nsfwScanInFlight = false
+                }
+            })
+        }
+    }
+
+    private fun findNsfwMediaRegions(): List<Rect> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val minSizePx = (NSFW_MIN_MEDIA_SIZE_DP * resources.displayMetrics.density).toInt()
+        val diagMinSizePx = (NSFW_DIAG_MIN_SIZE_DP * resources.displayMetrics.density).toInt()
+        val regions = mutableListOf<Rect>()
+        val fallbackCandidates = mutableListOf<Rect>()
+        val diagnostics = mutableListOf<String>()
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            node ?: return
+            val className = node.className?.toString().orEmpty()
+            val description = node.contentDescription?.toString().orEmpty()
+            val text = node.text?.toString().orEmpty()
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            val bigEnough = rect.width() >= minSizePx && rect.height() >= minSizePx
+
+            val matchesClass = NSFW_MEDIA_CLASS_KEYWORDS.any { className.contains(it, ignoreCase = true) }
+            val matchesDescription = description.isNotEmpty() && (
+                    NSFW_MEDIA_KEYWORDS.any { description.contains(it, ignoreCase = true) } ||
+                            NSFW_MEDIA_DESCRIPTION_PATTERNS.any { it.containsMatchIn(description) }
+                    )
+            val matchesText = NSFW_MEDIA_KEYWORDS.any { text.startsWith(it, ignoreCase = true) }
+
+            if ((matchesClass || matchesDescription || matchesText) && bigEnough && regions.none { it == rect }) {
+                regions.add(rect)
+            } else if (node.childCount == 0 && description.isEmpty() && text.isEmpty() && bigEnough) {
+                val aspect = rect.width().toFloat() / rect.height().toFloat()
+                if (aspect in NSFW_FALLBACK_MIN_ASPECT..NSFW_FALLBACK_MAX_ASPECT && fallbackCandidates.none { it == rect }) {
+                    fallbackCandidates.add(rect)
+                }
+            }
+
+            if (diagnostics.size < NSFW_DIAG_MAX_NODES && rect.width() >= diagMinSizePx && rect.height() >= diagMinSizePx) {
+                diagnostics.add("class=$className bounds=$rect desc=\"${description.take(50)}\" text=\"${text.take(30)}\"")
+            }
+
+            for (i in 0 until node.childCount) traverse(node.getChild(i))
+        }
+        traverse(root)
+        root.recycle()
+
+        if (regions.isEmpty() && fallbackCandidates.isNotEmpty()) {
+            val capped = fallbackCandidates
+                .sortedByDescending { it.width().toLong() * it.height() }
+                .take(NSFW_FALLBACK_MAX_CANDIDATES)
+            Timber.d("NSFW scan: no labeled media found, using ${capped.size}/${fallbackCandidates.size} geometric fallback candidate(s): $capped")
+            regions.addAll(capped)
+        }
+
+        if (regions.isEmpty()) {
+            Timber.d("NSFW scan: no media regions found. Large nodes on screen (>=${NSFW_DIAG_MIN_SIZE_DP}dp):\n" + diagnostics.joinToString("\n"))
+        } else {
+            Timber.d("NSFW scan: found ${regions.size} candidate region(s): $regions")
+        }
+        return regions
+    }
+
+    private fun cropToBitmap(source: Bitmap, rect: Rect): Bitmap? {
+        val left = rect.left.coerceIn(0, source.width)
+        val top = rect.top.coerceIn(0, source.height)
+        val right = rect.right.coerceIn(left, source.width)
+        val bottom = rect.bottom.coerceIn(top, source.height)
+        val width = right - left
+        val height = bottom - top
+        if (width <= 0 || height <= 0) return null
+
+        return try {
+            Bitmap.createBitmap(source, left, top, width, height)
+        } catch (e: Exception) {
+            Timber.w(e, "NSFW scan: failed to crop region $rect")
+            null
+        }
+    }
+
+    private fun showNsfwBlockedActivity() {
+        startActivity(Intent(this, NsfwContentBlockedActivity::class.java).apply {
+            flags = FLAG_ACTIVITY_NEW_TASK
+        })
+    }
+
     private fun suspendPackages(packages: Array<String>, suspend: Boolean = true) {
         val dpm = applicationContext.getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val admin = ComponentName(applicationContext, DechainerDeviceAdminReceiver::class.java)
@@ -572,9 +773,7 @@ class DechainerAccessibilityService : AccessibilityService() {
         dpm.setPackagesSuspended(admin, packages, suspend)
     }
 
-    private fun suspendPackage(packageName: String, suspend: Boolean = true) = suspendPackages(
-        arrayOf(packageName), suspend
-    )
+    private fun suspendPackage(packageName: String, suspend: Boolean = true) = suspendPackages(arrayOf(packageName), suspend)
 
     private fun getControlledPackages(): Array<String> {
         return targetPackages
@@ -586,8 +785,7 @@ class DechainerAccessibilityService : AccessibilityService() {
 
     private fun checkForbiddenWord(text: String): String? {
         forbiddenPatterns.forEach { (word: String, regex: Regex) ->
-            if (regex.containsMatchIn(text))
-                return word
+            if (regex.containsMatchIn(text)) return word
         }
         return null
     }
@@ -606,8 +804,7 @@ class DechainerAccessibilityService : AccessibilityService() {
             if (remainingMillis <= 0) {
                 executeBlocking()
                 return
-            } else
-                handler.postDelayed(blockRunnable, remainingMillis)
+            } else handler.postDelayed(blockRunnable, remainingMillis)
         }
 
         if (remainingSecondsReopening > 0)

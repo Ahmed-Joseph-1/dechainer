@@ -20,6 +20,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -37,6 +38,9 @@ import androidx.compose.ui.platform.LocalContext
 
 
 class MainActivity : ComponentActivity() {
+
+    private val authenticated = mutableStateOf(false)
+
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -117,11 +121,13 @@ class MainActivity : ComponentActivity() {
                         val selectedBaseTab = when (currentScreen) {
                             "restrictions" -> "restrictions"
                             "apps" -> "apps"
-                            "config", "setup_device_owner", "activity_blocker", "browser_restrictions", "blocked_words" -> "config"
+                            "config", "setup_device_owner", "activity_blocker", "browser_restrictions", "blocked_words", "visual_blocking" -> "config"
                             else -> "restrictions"
                         }
 
-                        NavigationBar {
+                        NavigationBar(
+                            modifier = Modifier.alpha(if (!authenticated.value) 0f else 1f)
+                        ) {
                             tabs.forEach { pair ->
                                 NavigationBarItem(
                                     selected = selectedBaseTab == pair.first,
@@ -145,17 +151,23 @@ class MainActivity : ComponentActivity() {
                     if (!(SecurityManager.isRecoveryCodeSet(this)))
                         SetupRecovery(innerPadding)
                     else {
-                        Box(modifier = Modifier.padding(innerPadding)) {
-                            when (currentScreen) {
-                                "restrictions" -> RestrictionsTab()
-                                "apps" -> AppsTab()
-                                "config" -> ConfigTab()
-                                "setup_device_owner" -> SetupDeviceOwnerPrivileges()
-                                "activity_blocker" -> ActivityBlockerScreen()
-                                "browser_restrictions" -> BrowserRestrictionsScreen()
-                                "blocked_words" -> BlockedWordsScreen()
+                        if (!authenticated.value)
+                            LockScreen(
+                                onAuthenticated = { authenticated.value = true }
+                            )
+                        else
+                            Box(modifier = Modifier.padding(innerPadding)) {
+                                when (currentScreen) {
+                                    "restrictions" -> RestrictionsTab()
+                                    "apps" -> AppsTab()
+                                    "config" -> ConfigTab()
+                                    "setup_device_owner" -> SetupDeviceOwnerPrivileges()
+                                    "activity_blocker" -> ActivityBlockerScreen()
+                                    "browser_restrictions" -> BrowserRestrictionsScreen()
+                                    "blocked_words" -> BlockedWordsScreen()
+                                    "visual_blocking" -> VisualBlockingScreen()
+                                }
                             }
-                        }
                     }
                 }
             }

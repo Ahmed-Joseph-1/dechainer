@@ -5,6 +5,7 @@ import io.github.warleysr.dechainer.security.SecurityManager
 import io.github.warleysr.dechainer.utils.NetworkBlockManager
 import timber.log.Timber
 
+
 class DechainerApplication : Application() {
 
     companion object {

@@ -11,6 +11,7 @@ import android.content.RestrictionEntry
 import android.content.RestrictionsManager
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.UserManager
 import android.util.Log
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -21,6 +22,7 @@ import rikka.shizuku.Shizuku
 import rikka.shizuku.Shizuku.OnRequestPermissionResultListener
 import androidx.core.net.toUri
 import io.github.warleysr.dechainer.DechainerDeviceAdminReceiver
+//import kotlinx.coroutines.flow.internal.NoOpContinuation.context
 
 class DeviceOwnerViewModel() : ViewModel() {
 
@@ -129,8 +131,34 @@ class DeviceOwnerViewModel() : ViewModel() {
         }
     }
 
+//    fun removeDeviceOwner() {
+//        processDeviceOwnerPrivileges(remove = true)
+//    }
+
+//    fun removeDeviceOwner() {
+//        try {
+//            // 1. Destroy the Sober Up dead proxy and network locks
+//            dpm.setRecommendedGlobalProxy(adminName, null)
+//            dpm.clearUserRestriction(adminName, UserManager.DISALLOW_CONFIG_WIFI)
+//            dpm.clearUserRestriction(adminName, UserManager.DISALLOW_CONFIG_MOBILE_NETWORKS)
+//            dpm.clearUserRestriction(adminName, UserManager.DISALLOW_CONFIG_TETHERING)
+//
+//            // 2. Remove the Device Owner privileges
+//            processDeviceOwnerPrivileges(remove = true)
+//        } catch (e: Exception) {
+//            e.printStackTrace()
+//        }
+//    }
+
     fun removeDeviceOwner() {
-        processDeviceOwnerPrivileges(remove = true)
+        try {
+            // Aggressively destroy network locks before giving up the admin component
+            io.github.warleysr.dechainer.utils.NetworkBlockManager.cancelBlock(io.github.warleysr.dechainer.DechainerApplication.getInstance())
+            // Remove the Device Owner privileges
+            processDeviceOwnerPrivileges(remove = true)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     fun processDeviceOwnerPrivileges(remove: Boolean = false) {
